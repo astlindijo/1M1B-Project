@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GreenCampus AI</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ─── Header ─────────────────────────────────────────────────────────── -->
+  <header class="app-header">
+    <div class="header-inner">
+      <span class="logo-leaf" aria-hidden="true">🌿</span>
+      <div class="header-text">
+        <h1>GreenCampus AI</h1>
+        <p>AI-powered sustainability decision support for educational campuses</p>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── Chat container ─────────────────────────────────────────────────── -->
+  <main class="chat-container" id="chatContainer">
+    <!-- Messages are injected here by JS -->
+    <div class="message assistant" id="welcomeMessage">
+      <div class="bubble">
+        <strong>Welcome to GreenCampus AI!</strong><br />
+        I can help with campus sustainability topics including energy, water, waste,
+        transportation, recycling, and sustainable events.<br /><br />
+        What sustainability challenge can I help you with today?
+      </div>
+    </div>
+  </main>
+
+  <!-- ─── Source badge (shown when RAG docs were used) ──────────────────── -->
+  <div class="sources-bar" id="sourcesBar" hidden>
+    <span class="sources-label">Sources:</span>
+    <span class="sources-list" id="sourcesList"></span>
+  </div>
+
+  <!-- ─── Input area ────────────────────────────────────────────────────── -->
+  <footer class="input-area">
+    <form class="input-form" id="inputForm" autocomplete="off">
+      <textarea
+        id="userInput"
+        class="input-box"
+        placeholder="Ask a sustainability question…"
+        rows="1"
+        aria-label="Your question"
+        required
+      ></textarea>
+      <button type="submit" class="send-btn" id="sendBtn" aria-label="Send">
+        Send
+      </button>
+    </form>
+    <p class="disclaimer">
+      GreenCampus AI is a decision-support tool. Campus authorities make final decisions.
+    </p>
+  </footer>
+
+  <script>
+    // ─── Session ID (persists for this browser tab) ───────────────────────
+    const SESSION_ID = 'session-' + Math.random().toString(36).slice(2);
+
+    // ─── DOM refs ─────────────────────────────────────────────────────────
+    const chatContainer = document.getElementById('chatContainer');
+    const inputForm     = document.getElementById('inputForm');
+    const userInput     = document.getElementById('userInput');
+    const sendBtn       = document.getElementById('sendBtn');
+    const sourcesBar    = document.getElementById('sourcesBar');
+    const sourcesList   = document.getElementById('sourcesList');
+
+    // ─── Auto-resize textarea ─────────────────────────────────────────────
+    userInput.addEventListener('input', () => {
+      userInput.style.height = 'auto';
+      userInput.style.height = Math.min(userInput.scrollHeight, 160) + 'px';
+    });
+
+    // Submit on Enter (Shift+Enter = new line)
+    userInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        inputForm.requestSubmit();
+      }
+    });
+
+    // ─── Markdown → HTML (minimal subset for AI responses) ───────────────
+    function renderMarkdown(text) {
+      return text
+        // Bold: **text** or __text__
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/__(.+?)__/g, '<strong>$1</strong>')
+        // Italic: *text* or _text_
+        .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+        // Headings: ## Heading → <h3>
+        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+        // Bullet lists: lines starting with - or *
+        .replace(/^[*-] (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>[\s\S]+?<\/li>)(?=\n(?![*-])|\n*$)/g, '<ul>$1</ul>')
+        // Numbered lists
+        .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+        // Line breaks
+        .replace(/\n{2,}/g, '</p><p>')
+        .replace(/\n/g, '<br />')
+        // Wrap in paragraph if not already
+        .replace(/^(?!<[hup])(.+)$/, '<p>$1</p>');
+    }
+
+    // ─── Append a message bubble ─────────────────────────────────────────
+    function appendMessage(role, htmlContent, isLoading = false) {
+      const wrapper = document.createElement('div');
+      wrapper.className = `message ${role}`;
+      if (isLoading) wrapper.id = 'loadingBubble';
+
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.innerHTML = htmlContent;
+
+      wrapper.appendChild(bubble);
+      chatContainer.appendChild(wrapper);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+      return wrapper;
+    }
+
+    // ─── Show / hide sources bar ─────────────────────────────────────────
+    function showSources(sources) {
+      if (!sources || sources.length === 0) {
+        sourcesBar.hidden = true;
+        return;
+      }
+      sourcesList.textContent = sources.join(', ');
+      sourcesBar.hidden = false;
+    }
+
+    // ─── Submit handler ──────────────────────────────────────────────────
+    inputForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const text = userInput.value.trim();
+      if (!text) return;
+
+      // Append user message
+      appendMessage('user', escapeHtml(text));
+      userInput.value = '';
+      userInput.style.height = 'auto';
+
+      // Disable input while waiting
+      sendBtn.disabled = true;
+      userInput.disabled = true;
+
+      // Show loading indicator
+      const loadingEl = appendMessage('assistant', '<span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>', true);
+
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, sessionId: SESSION_ID }),
+        });
+
+        loadingEl.remove();
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          appendMessage('assistant', `<span class="error-text">⚠ ${err.error || 'Something went wrong. Please try again.'}</span>`);
+          return;
+        }
+
+        const data = await response.json();
+        appendMessage('assistant', renderMarkdown(data.reply));
+        showSources(data.sources);
+
+      } catch (err) {
+        loadingEl.remove();
+        appendMessage('assistant', '<span class="error-text">⚠ Could not reach the server. Please check your connection.</span>');
+      } finally {
+        sendBtn.disabled = false;
+        userInput.disabled = false;
+        userInput.focus();
+      }
+    });
+
+    // ─── HTML escape helper ──────────────────────────────────────────────
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/\n/g, '<br />');
+    }
+  </script>
+</body>
+</html>
